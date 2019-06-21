@@ -101,6 +101,14 @@ class QuibbleCmd(object):
             action='store_true',
             help='Do not install MediaWiki')
         parser.add_argument(
+            '--webserver',
+            choices=['apache2', 'php', 'none'],
+            default='php',
+            help='Web server to use. Default to PHP built-in. '
+                 'Apache2 will spawn an httpd process while none assumes that '
+                 'the local MediaWiki site can be accessed at 127.0.0.1 via an '
+                 'already running web server.')
+        parser.add_argument(
             '--db',
             choices=['sqlite', 'mysql', 'postgres'],
             default='mysql',

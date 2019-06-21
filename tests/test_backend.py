@@ -154,7 +154,8 @@ class TestDevWebServer(unittest.TestCase):
     def test_using_php(self, _):
         http_port = '4881'
         php_is_hhvm.cache_clear()
-        with DevWebServer(mwdir=PHPDOCROOT, port=http_port, router=None):
+        with DevWebServer(mwdir=PHPDOCROOT, port=http_port, router=None,
+                          webserver='php'):
             self.assertServerRespond('zend', 'http://127.0.0.1:%s' % http_port)
 
     @attr('integration')
@@ -164,9 +165,9 @@ class TestDevWebServer(unittest.TestCase):
     def test_using_hhvm(self, _):
         http_port = '4882'
         php_is_hhvm.cache_clear()
-        with DevWebServer(mwdir=PHPDOCROOT, port=http_port, router=None):
-            self.assertServerRespond('hhvm',
-                                     'http://127.0.0.1:%s' % http_port)
+        with DevWebServer(mwdir=PHPDOCROOT, port=http_port, router=None,
+                          webserver='php'):
+            self.assertServerRespond('hhvm', 'http://127.0.0.1:%s' % http_port)
 
     @attr('integration')
     # assumes "php" is Zend. Would fail if it happens to be HHVM

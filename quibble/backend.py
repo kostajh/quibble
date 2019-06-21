@@ -354,29 +354,41 @@ class ChromeWebDriver(BackendServer):
 class DevWebServer(BackendServer):
 
     def __init__(self, host='127.0.0.1', port=4881, mwdir=None,
-                 router='maintenance/dev/includes/router.php'):
+                 router='maintenance/dev/includes/router.php',
+                 webserver='php'):
         super(DevWebServer, self).__init__()
 
         self.host = host
         self.port = port
         self.mwdir = mwdir
         self.router = router
+        self.webserver = webserver
+        if self.webserver == 'apache2':
+            self.port = 9412
 
     def start(self):
-        self.log.info('Starting MediaWiki built in webserver')
+        if self.webserver == 'none':
+            self.log.info('Not starting a webserver.')
+            return
 
-        if php_is_hhvm():
-            server_cmd = ['hhvm', '-m', 'server', '-p', str(self.port)]
-            server_cmd.extend([
-                # HHVM does not set Content-Type for svg files T195634
-                '-d', 'hhvm.static_file.extensions[svg]=image/svg+xml',
+        self.log.info('Starting %s webserver', self.webserver)
+
+        if self.webserver == 'php':
+            if php_is_hhvm():
+                server_cmd = ['hhvm', '-m', 'server', '-p', str(self.port)]
+                server_cmd.extend([
+                    # HHVM does not set Content-Type for svg files T195634
+                    '-d', 'hhvm.static_file.extensions[svg]=image/svg+xml',
                 ])
-        else:
-            server_cmd = ['php', '-d', 'output_buffering=Off', '-S',
-                          '%s:%s' % (self.host, self.port)]
-            if self.router:
-                server_cmd.append(
-                    os.path.join(self.mwdir, self.router))
+            else:
+                server_cmd = ['php', '-d', 'output_buffering=Off', '-S',
+                              '127.0.0.1:%s' % self.port]
+                if self.router:
+                    server_cmd.append(
+                        os.path.join(self.mwdir, self.router))
+        elif self.webserver == 'apache2':
+            subprocess.Popen(['php-fpm7.0', '-D'])
+            server_cmd = ['apache2ctl', '-DFOREGROUND']
 
         self.server = subprocess.Popen(
             server_cmd,
@@ -394,7 +406,8 @@ class DevWebServer(BackendServer):
         return 'http://%s:%s' % (self.host, self.port)
 
     def __repr__(self):
-        return '<DevWebServer :%s %s>' % (self.port, self.mwdir)
+        return '<%s DevWebServer :%s %s>' % (self.webserver, self.port,
+                                             self.mwdir)
 
     def __del__(self):
         self.stop()

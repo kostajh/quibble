@@ -14,7 +14,7 @@
 #     See the License for the specific language governing permissions and
 #     limitations under the License.
 
-FROM docker-registry.wikimedia.org/releng/npm-stretch:latest as npm-stretch
+FROM docker-registry.wikimedia.org/releng/node10-test:latest as node10-test
 FROM docker-registry.wikimedia.org/releng/ci-stretch:latest
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -55,10 +55,15 @@ RUN apt-get update \
         php-tidy \
         php-xml \
         php-zip \
+        php-fpm \
         djvulibre-bin \
         imagemagick \
         libimage-exiftool-perl \
         mariadb-server \
+        apache2 \
+        python \
+        ffmpeg \
+        build-essential \
         nodejs-legacy \
         tidy \
     && : "Xvfb" \
@@ -68,9 +73,8 @@ RUN apt-get update \
     && apt-get purge -y python3-pip \
     && rm -fR /cache/pip
 
-COPY --from=npm-stretch /usr/local/lib/node_modules/npm/ /usr/local/lib/node_modules/npm/
-# Manually link since COPY copies symlink destination instead of the actual symlink
-RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+COPY --from=node10-test /srv/npm/ /srv/npm
+RUN ln -s /srv/npm/bin/npm-cli.js /usr/local/bin/npm
 
 RUN apt-get update \
     && apt-get install -y \
@@ -85,6 +89,35 @@ COPY . /opt/quibble
 RUN cd /opt/quibble && \
     python3 setup.py install && \
     rm -fR /opt/quibble /cache/pip
+
+# Restart so that Apache knows to process PHP files.
+RUN a2enmod proxy_fcgi \
+  && a2enmod mpm_event \
+  && a2enmod rewrite \
+  && a2enmod http2 \
+  && a2enmod cache
+COPY ./quibble/php-fpm/php-fpm.conf /etc/php/7.0/fpm/php-fpm.conf
+COPY ./quibble/php-fpm/www.conf /etc/php/7.0/fpm/pool.d/www.conf
+RUN mkdir /tmp/php && chown -R nobody:nogroup /tmp/php
+RUN touch /tmp/php7.0-fpm.log /tmp/php/php7.0-fpm.pid \
+  && chown nobody:nogroup /tmp/php7.0-fpm.log /tmp/php/php7.0-fpm.pid
+RUN service apache2 restart
+
+RUN echo 'opcache.validate_timestamps=0\n\
+opcache.file_update_protection=0\n\
+opcache.memory_consumption=256\n\
+opcache.max_accelerated_files=24000\n\
+opcache.max_wasted_percentage=10\n\
+opcache.revalidate_freq=0\n\
+opcache.fast_shutdown=1' > /etc/php/7.0/fpm/php.ini
+
+RUN echo 'zlib.output_compression=On' >> /etc/php/7.0/fpm/php.ini
+
+RUN service php7.0-fpm restart
+COPY ./quibble/apache/ports.conf /etc/apache2/ports.conf
+COPY ./quibble/apache/000-default.conf /etc/apache2/sites-available/000-default.conf
+COPY ./quibble/apache/apache2.conf /etc/apache2/apache2.conf
+COPY ./quibble/apache/envvars /etc/apache2/envvars
 
 # Unprivileged
 RUN install --directory /workspace --owner=nobody --group=nogroup
