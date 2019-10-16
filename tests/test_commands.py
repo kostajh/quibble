@@ -140,6 +140,7 @@ class VendorComposerDependenciesTest(unittest.TestCase):
 class InstallMediaWikiTest(unittest.TestCase):
 
     @mock.patch('builtins.open', mock.mock_open())
+    @mock.patch('os.rename')
     @mock.patch('quibble.mediawiki.maintenance.rebuildLocalisationCache')
     @mock.patch('quibble.util.copylog')
     @mock.patch('subprocess.check_call')
@@ -162,7 +163,12 @@ class InstallMediaWikiTest(unittest.TestCase):
         # TODO: Assert that localsettings is edited correctly.
 
         mock_install_script.assert_called_once_with(
-            args=['--scriptpath=', '--dbtype=mysql', '--dbname=testwiki',
+            args=['--scriptpath=',
+                  '--server=http://%s:%s' % (
+                      quibble.commands.HTTP_HOST,
+                      quibble.commands.HTTP_PORT
+                  ),
+                  '--dbtype=mysql', '--dbname=testwiki',
                   '--dbuser=USER', '--dbpass=PASS', '--dbserver=SERVER'],
             mwdir='/tmp')
 
@@ -206,7 +212,46 @@ class PhpUnitDatabaselessTest(unittest.TestCase):
             env=mock.ANY)
 
 
-class BrowserTestsTest(unittest.TestCase):
+class PhpUnitUnitTest(unittest.TestCase):
+
+    @mock.patch('builtins.open', mock.mock_open())
+    @mock.patch('json.load')
+    @mock.patch('subprocess.check_call')
+    def test_execute_no_scripts(self, mock_check_call, mock_load, *_):
+        mock_load.return_value = {
+            "requires": {}
+        }
+
+        quibble.commands.PhpUnitUnit(
+            mw_install_path='/tmp', log_dir='/log'
+        ).execute()
+
+        mock_check_call.assert_not_called()
+
+    @mock.patch('os.path.exists', return_value=True)
+    @mock.patch('builtins.open', mock.mock_open())
+    @mock.patch('json.load')
+    @mock.patch('subprocess.check_call')
+    def test_execute_has_units(self, mock_check_call, mock_load, *_):
+        mock_load.return_value = {
+            "scripts": {
+                "phpunit:unit": {}
+            }
+        }
+
+        quibble.commands.PhpUnitUnit(
+            mw_install_path='/tmp', log_dir='/log'
+        ).execute()
+
+        mock_check_call.assert_called_once_with(
+            ['composer', 'phpunit:unit', '--',
+             '--exclude-group', 'Broken,ParserFuzz,Stub',
+             '--log-junit', '/log/junit-unit.xml'],
+            cwd='/tmp',
+            env=mock.ANY)
+
+
+class QunitTestsTest(unittest.TestCase):
 
     @mock.patch.dict('os.environ', {'somevar': '42'}, clear=True)
     @mock.patch('quibble.backend.DevWebServer')
@@ -219,9 +264,67 @@ class BrowserTestsTest(unittest.TestCase):
 
         mock_check_call.side_effect = check_env_for_no_sandbox
 
-        quibble.commands.BrowserTests('/tmp', True, False, None).execute()
+        quibble.commands.QunitTests('/tmp').execute()
 
         assert mock_check_call.call_count > 0
+
+
+class BrowserTestsTest(unittest.TestCase):
+
+    @mock.patch('os.path.exists', return_value=True)
+    @mock.patch('builtins.open', mock.mock_open())
+    @mock.patch('json.load')
+    @mock.patch('subprocess.check_call')
+    @mock.patch('quibble.backend.DevWebServer')
+    @mock.patch('quibble.backend.ChromeWebDriver')
+    def test_project_selenium(self, mock_driver, mock_server, mock_check_call,
+                              mock_load, mock_path_exists):
+        mock_load.return_value = {
+            'scripts': {
+                'selenium-test': 'run that stuff'
+            }
+        }
+
+        c = quibble.commands.BrowserTests(
+                '/tmp', ['mediawiki/core', 'mediawiki/skins/Vector'], ':0')
+        c.execute()
+
+        mock_check_call.assert_any_call(
+            ['npm', 'run', 'selenium-test'],
+            cwd='/tmp', env=mock.ANY)
+        mock_check_call.assert_any_call(
+            ['npm', 'run', 'selenium-test'],
+            cwd='/tmp/skins/Vector', env=mock.ANY)
+
+    @mock.patch('os.path.exists', return_value=True)
+    @mock.patch('builtins.open', mock.mock_open())
+    @mock.patch('json.load')
+    @mock.patch('subprocess.check_call')
+    @mock.patch('quibble.backend.DevWebServer')
+    @mock.patch('quibble.backend.ChromeWebDriver')
+    def test_project_missing_selenium(self, mock_driver, mock_server,
+                                      mock_check_call, mock_load,
+                                      mock_path_exists):
+        mock_load.return_value = {
+            'scripts': {
+                'other-test': 'foo'
+            }
+        }
+
+        c = quibble.commands.BrowserTests(
+                '/tmp', ['mediawiki/core', 'mediawiki/skins/Vector'], ':0')
+        c.execute()
+
+        mock_check_call.assert_not_called()
+
+    @mock.patch('subprocess.check_call')
+    @mock.patch('quibble.backend.DevWebServer')
+    @mock.patch('quibble.backend.ChromeWebDriver')
+    def test_project_not_having_package_json(self, mock_driver, mock_server,
+                                             mock_check_call):
+        c = quibble.commands.BrowserTests('/tmp', ['mediawiki/vendor'], ':0')
+        c.execute()
+        mock_check_call.assert_not_called()
 
 
 class UserCommandsTest(unittest.TestCase):

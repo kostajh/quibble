@@ -46,7 +46,7 @@ class CmdTest(unittest.TestCase):
     def test_projects_to_clone(self):
         q = cmd.QuibbleCmd()
         self.assertEqual(
-            q.set_repos_to_clone(),
+            q.repos_to_clone(),
             ['mediawiki/core', 'mediawiki/skins/Vector'],
             'Incorrect repos to clone')
 
@@ -54,7 +54,7 @@ class CmdTest(unittest.TestCase):
     def test_projects_to_clone_with_vendor(self):
         q = cmd.QuibbleCmd()
         self.assertEqual(
-            q.set_repos_to_clone(clone_vendor=True),
+            q.repos_to_clone(clone_vendor=True),
             ['mediawiki/core', 'mediawiki/skins/Vector', 'mediawiki/vendor'],
             'Incorrect repos to clone')
 
@@ -62,15 +62,31 @@ class CmdTest(unittest.TestCase):
     def test_projects_to_clone_appends_projects(self):
         q = cmd.QuibbleCmd()
         self.assertEqual(
-            q.set_repos_to_clone(projects=[
+            q.repos_to_clone(projects=[
                 'mediawiki/extensions/BoilerPlate',
                 'mediawiki/extensions/Example',
                 ]),
-            ['mediawiki/core', 'mediawiki/skins/Vector',
+            ['mediawiki/core',
              'mediawiki/extensions/BoilerPlate',
-             'mediawiki/extensions/Example'])
+             'mediawiki/extensions/Example',
+             'mediawiki/skins/Vector'])
 
-    def test_set_repos_to_clone_with_env(self):
+    @mock.patch.dict('os.environ', clear=True)
+    def test_projects_to_clone_deduplicates(self):
+        q = cmd.QuibbleCmd()
+        self.assertEqual(
+            q.repos_to_clone(
+                projects=[
+                    'mediawiki/extensions/BoilerPlate',
+                    'mediawiki/extensions/Example',
+                ],
+                zuul_project='mediawiki/extensions/Example'),
+            ['mediawiki/core',
+             'mediawiki/extensions/BoilerPlate',
+             'mediawiki/extensions/Example',
+             'mediawiki/skins/Vector'])
+
+    def test_repos_to_clone_with_env(self):
         env = {
             'SKIN_DEPENDENCIES': 'mediawiki/skins/Monobook',
             'EXT_DEPENDENCIES':
@@ -80,11 +96,11 @@ class CmdTest(unittest.TestCase):
             q = cmd.QuibbleCmd()
             self.assertEqual([
                 'mediawiki/core',  # must be first
-                'mediawiki/skins/Vector',
-                'mediawiki/skins/Monobook',
                 'mediawiki/extensions/One',
                 'mediawiki/extensions/Two',
-                ], q.set_repos_to_clone())
+                'mediawiki/skins/Monobook',
+                'mediawiki/skins/Vector',
+                ], q.repos_to_clone())
 
     def test_env_dependencies_log_a_warning(self):
         env = {
@@ -94,7 +110,7 @@ class CmdTest(unittest.TestCase):
         with mock.patch.dict('os.environ', env, clear=True):
             with self.assertLogs('quibble.cmd', level='WARNING') as log:
                 q = cmd.QuibbleCmd()
-                q.set_repos_to_clone()
+                q.repos_to_clone()
 
         self.assertRegex(
             log.output[0],
@@ -103,38 +119,13 @@ class CmdTest(unittest.TestCase):
             log.output[1],
             '^WARNING:quibble.cmd:EXT_DEPENDENCIES')
 
-    def test_set_repos_to_clone_adds_ZUUL_PROJECT(self):
-        env = {'ZUUL_PROJECT': 'mediawiki/extensions/ZuulProjectEnvVar'}
-        with mock.patch.dict('os.environ', env, clear=True):
-            q = cmd.QuibbleCmd()
-            self.assertEqual([
-                'mediawiki/core',  # must be first
-                'mediawiki/skins/Vector',
-                'mediawiki/extensions/ZuulProjectEnvVar',
-                ], q.set_repos_to_clone())
-
-    def test_set_repos_to_clone_does_not_duplicate_hardcoded_repos(self):
-        hardcoded_repos = [
-            'mediawiki/core',
-            'mediawiki/skins/Vector',
-            ]
-
-        for repo in hardcoded_repos:
-            with mock.patch.dict('os.environ', {'ZUUL_PROJECT': repo},
-                                 clear=True):
-                q = cmd.QuibbleCmd()
-                self.assertEqual([
-                    'mediawiki/core',  # must be first
-                    'mediawiki/skins/Vector',
-                    ], q.set_repos_to_clone())
-
     @mock.patch('quibble.is_in_docker', return_value=False)
     def test_args_defaults(self, _):
         args = cmd.QuibbleCmd().parse_arguments([])
 
         self.assertEqual('ref', args.git_cache)
         self.assertEqual(os.getcwd(), args.workspace)
-        self.assertEqual(os.path.join(os.getcwd(), 'log'), args.log_dir)
+        self.assertEqual('log', args.log_dir)
 
     @mock.patch('quibble.is_in_docker', return_value=True)
     def test_args_defaults_in_docker(self, _):
@@ -142,7 +133,6 @@ class CmdTest(unittest.TestCase):
 
         self.assertEqual('/srv/git', args.git_cache)
         self.assertEqual('/workspace', args.workspace)
-        self.assertEqual('/workspace/log', args.log_dir)
 
     @mock.patch.dict(os.environ, clear=True)
     def test_setup_environment(self):
@@ -184,21 +174,6 @@ class CmdTest(unittest.TestCase):
         self.assertIn('MW_LOG_DIR', os.environ)
         self.assertEqual(os.environ['LOG_DIR'], '/mylog')
         self.assertEqual(os.environ['MW_LOG_DIR'], '/mylog')
-
-    def test_isCoreOrVendor(self):
-        q = cmd.QuibbleCmd()
-        self.assertTrue(q.isCoreOrVendor('mediawiki/core'))
-        self.assertTrue(q.isCoreOrVendor('mediawiki/vendor'))
-        self.assertFalse(q.isCoreOrVendor('mediawiki/extensions/Foo'))
-        self.assertFalse(q.isCoreOrVendor('mediawiki/skins/Bar'))
-
-    def test_isExtOrSkin(self):
-        q = cmd.QuibbleCmd()
-        q.isExtOrSkin
-        self.assertTrue(q.isExtOrSkin('mediawiki/extensions/Foo'))
-        self.assertTrue(q.isExtOrSkin('mediawiki/skins/Bar'))
-        self.assertFalse(q.isExtOrSkin('mediawiki/core'))
-        self.assertFalse(q.isExtOrSkin('mediawiki/vendor'))
 
     def test_should_run_accepts_all_stages_by_default(self):
         q = cmd.QuibbleCmd()
@@ -297,4 +272,39 @@ class CmdTest(unittest.TestCase):
         args = q.parse_arguments(args=[])
         plan = q.build_execution_plan(args)
 
-        self.assertIsInstance(plan[0], quibble.commands.ZuulCloneCommand)
+        self.assertIsInstance(plan[0], quibble.commands.ReportVersions)
+        mock_makedirs.assert_any_call(
+            os.path.join(args.workspace, 'log'), exist_ok=True)
+
+    @mock.patch('quibble.is_in_docker', return_value=False)
+    def test_build_execution_plan_adds_ZUUL_PROJECT(self, _):
+        env = {'ZUUL_PROJECT': 'mediawiki/extensions/ZuulProjectEnvVar'}
+        with mock.patch.dict('os.environ', env, clear=True):
+            q = cmd.QuibbleCmd()
+            args = q.parse_arguments(
+                args=['--packages-source=composer'])
+            q.build_execution_plan(args)
+            self.assertEqual([
+                'mediawiki/core',  # must be first
+                'mediawiki/extensions/ZuulProjectEnvVar',
+                'mediawiki/skins/Vector',
+                ], q.dependencies)
+
+    @mock.patch('quibble.is_in_docker', return_value=False)
+    def test_build_execution_plan_does_not_duplicate_hardcoded_repos(self, _):
+        hardcoded_repos = [
+            'mediawiki/core',
+            'mediawiki/skins/Vector',
+            ]
+
+        for repo in hardcoded_repos:
+            with mock.patch.dict('os.environ', {'ZUUL_PROJECT': repo},
+                                 clear=True):
+                q = cmd.QuibbleCmd()
+                args = q.parse_arguments(
+                    args=['--packages-source=composer'])
+                q.build_execution_plan(args)
+                self.assertEqual([
+                    'mediawiki/core',  # must be first
+                    'mediawiki/skins/Vector',
+                    ], q.dependencies)

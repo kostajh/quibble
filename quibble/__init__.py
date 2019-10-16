@@ -13,10 +13,12 @@
 #     See the License for the specific language governing permissions and
 #     limitations under the License.
 
+from contextlib import contextmanager
 from functools import lru_cache
 import logging
 import os
 import subprocess
+import time
 
 
 def colored_logging():
@@ -37,10 +39,25 @@ def colored_logging():
         logging.CRITICAL, "\033[41m%s\033[0m" %
         logging.getLevelName(logging.CRITICAL))
 
+# Can be used to temporarily alter a logging level.
+#
+# with logginglevel('root', logging.ERROR):
+#     do something silently
+#
+@contextmanager
+def logginglevel(name, new_level):
+    logger = logging.getLogger(name)
+    prev_level = logger.getEffectiveLevel()
+    logger.setLevel(new_level)
+    try:
+        yield
+    finally:
+        logger.setLevel(prev_level)
+
 
 def use_headless():
     log = logging.getLogger('quibble.use_headless')
-    log.info("Display: %s" % os.environ.get('DISPLAY', '<None>'))
+    log.info("Display: %s", os.environ.get('DISPLAY', '<None>'))
 
     return not bool(os.environ.get('DISPLAY'))
 
@@ -67,7 +84,7 @@ def chromium_flags():
         ])
 
     log = logging.getLogger('quibble.chromium_flags')
-    log.debug("Flags: %s" % args)
+    log.debug("Flags: %s", args)
     return ' '.join(args)
 
 
@@ -78,3 +95,15 @@ def is_in_docker():
 @lru_cache(maxsize=1)
 def php_is_hhvm():
     return b'HipHop' in subprocess.check_output(['php', '--version'])
+
+
+@contextmanager
+def Chronometer(name, logger):
+
+    start = time.time()
+    try:
+        yield
+    finally:
+        duration = time.time() - start
+        if logger:
+            logger('%s finished in %.03f s' % (name, duration))

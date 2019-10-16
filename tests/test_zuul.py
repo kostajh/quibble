@@ -81,6 +81,77 @@ class TestClone(unittest.TestCase):
         self.assertEquals('REL1_42',
                           kwargs['project_branches']['mediawiki/vendor'])
 
+    @mock.patch('quibble.zuul.ThreadPoolExecutor')
+    @mock.patch('quibble.zuul.Cloner')
+    def test_can_clone_without_mediawiki_core(
+        self, mock_cloner, mock_executor
+    ):
+        repos_to_clone = [
+            'mediawiki/skins/Foo',
+            'mediawiki/skins/Bar',
+        ]
+        with mock.patch('quibble.zuul.as_completed'):
+            quibble.zuul.clone(
+                branch='master', cache_dir='/tmp/cache', project_branch=[],
+                # Clone without mediawiki/core
+                projects=repos_to_clone,
+                workers=2, workspace='/tmp/src',
+                zuul_branch=None, zuul_newrev=None, zuul_project=None,
+                zuul_ref=None, zuul_url=None)
+
+        # Make sure MediaWiki core does not get cloned
+        self.assertNotIn(
+            mock.call().prepareRepo('mediawiki/core', mock.ANY),
+            mock_cloner.mock_calls
+            )
+
+        # Verify the ThreadExecutor that invokes Cloner().prepareRepo has only
+        # been given our repositories.
+        expected_calls = []
+        for expected_repo in repos_to_clone:
+            expected_calls.append(
+                mock.call().__enter__().submit(
+                    quibble.zuul.clone_worker,
+                    mock.ANY,  # can_run
+                    mock.ANY,  # zuul_cloner
+                    expected_repo,
+                    mock.ANY  # we don't care about the destination
+                    )
+            )
+
+        # Wrap with context manager calls to delimit the prepareRepo calls and
+        # thus ensure no other repository sneaked in
+        expected_calls.insert(0, mock.call().__enter__())
+        expected_calls.append(mock.call().__exit__(None, None, None))
+        mock_executor.assert_has_calls(expected_calls)
+
+    @mock.patch('quibble.zuul.Cloner')
+    def test_mediawiki_core_cloned_first_when_running_in_parallel(
+        self, mock_cloner
+    ):
+        repos_to_clone = [
+            'mediawiki/extensions/Bar',
+            'mediawiki/skins/Vector',
+            'mediawiki/core',
+        ]
+        quibble.zuul.clone(
+            branch='master', cache_dir='/tmp/cache', project_branch=[],
+            # Clone without mediawiki/core
+            projects=repos_to_clone,
+            workers=2, workspace='/tmp/src',
+            zuul_branch=None, zuul_newrev=None, zuul_project=None,
+            zuul_ref=None, zuul_url=None)
+        self.maxDiff = None
+
+        mock_cloner.assert_has_calls([
+            # MediaWiki core first
+            mock.call().prepareRepo('mediawiki/core', mock.ANY),
+            mock.call().log.getChild('mediawiki/extensions/Bar'),
+            mock.call().prepareRepo('mediawiki/extensions/Bar', mock.ANY),
+            mock.call().log.getChild('mediawiki/skins/Vector'),
+            mock.call().prepareRepo('mediawiki/skins/Vector', mock.ANY),
+        ])
+
 
 class TestRepoDir(unittest.TestCase):
 

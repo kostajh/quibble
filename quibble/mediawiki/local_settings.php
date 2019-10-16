@@ -77,7 +77,7 @@ $wgEnableJavaScriptTest = true;
 // This is a horrrrible hack to let extensions (such as Wikibase) behave
 // differently when being run on Wikimedia Jenkins CI.  That is more or less
 // needed when running Wikibase under Apache for QUnit, since the Jenkins
-// environnement variables are not available to the Apache process.
+// environment variables are not available to the Apache process.
 $wgWikimediaJenkinsCI = true;
 
 // Configure $wgDjvu for the MediaWiki core DJVU unit tests
@@ -85,3 +85,16 @@ $wgDjvuDump = '/usr/bin/djvudump';
 $wgDjvuRenderer = '/usr/bin/ddjvu';
 $wgDjvuToXML = '/usr/bin/djvutoxml';
 $wgDjvuTxt = '/usr/bin/djvutxt';
+
+# Set cache directory
+$wgCacheDirectory = getenv( 'TMPDIR' );
+
+require_once( __DIR__ . '/LocalSettings-installer.php' );
+
+# Force secret key. This key can be shared with the configuration
+# of testing tools, to allow them to perform privileged actions,
+# such as running jobs.
+$wgSecretKey = 'supercalifragilisticexpialidocious';
+
+// Hack to support Extension:FileImporter browser tests, T190829
+$wgEnableUploads = true;

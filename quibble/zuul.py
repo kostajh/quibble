@@ -16,8 +16,9 @@
 import copy
 import logging
 import os
+import threading
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from zuul.lib.cloner import Cloner
 from zuul.lib.clonemapper import CloneMapper
@@ -75,24 +76,43 @@ def clone(branch, cache_dir, project_branch, projects, workers, workspace,
 
     # Reimplement the cloner execute method with parallelism and logging
     # suitable for multiplexed output.
-    log.info("Preparing %s repositories with %s workers" % (
-             len(dests), workers))
+    log.info("Preparing %d repositories with %s workers",
+             len(dests), workers)
 
-    mw_git_dir = os.path.join(dests['mediawiki/core'], '.git')
-    if not os.path.exists(mw_git_dir):
-        log.info("Cloning mediawiki/core first")
-        zuul_cloner.prepareRepo('mediawiki/core', dests['mediawiki/core'])
-        del(dests['mediawiki/core'])
+    if 'mediawiki/core' in projects:
+        mw_git_dir = os.path.join(dests['mediawiki/core'], '.git')
+        if not os.path.exists(mw_git_dir):
+            log.info("Cloning mediawiki/core first")
+            zuul_cloner.prepareRepo('mediawiki/core', dests['mediawiki/core'])
+            del(dests['mediawiki/core'])
+
+    can_run = threading.Event()
+    can_run.set()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        for project, dest in dests.items():
-            # Copy and hijack the logger
-            project_cloner = copy.copy(zuul_cloner)
-            project_cloner.log = project_cloner.log.getChild(project)
-
-            executor.submit(project_cloner.prepareRepo, project, dest)
+        futures = [
+            executor.submit(clone_worker, can_run, zuul_cloner, project, dest)
+            for project, dest in dests.items()]
+        # Consume results
+        for future in as_completed(futures):
+            future.result()
 
     log.info("Prepared all repositories")
+
+
+def clone_worker(can_run, cloner, project, dest):
+    if not can_run.is_set():
+        return
+
+    # Forge a new child logger, since repositories might be cloned concurrently
+    project_cloner = copy.copy(cloner)
+    project_cloner.log = project_cloner.log.getChild(project)
+    try:
+        project_cloner.prepareRepo(project, dest)
+    except Exception as e:
+        # Prevent other workers from executing
+        can_run.clear()
+        raise e
 
 
 def repo_dir(repo):

@@ -27,6 +27,7 @@ import quibble.mediawiki.maintenance
 import quibble.backend
 import quibble.zuul
 import quibble.commands
+import quibble.util
 
 
 # Used for add_argument(choices=) let us validate multiple choices at once.
@@ -42,7 +43,8 @@ class MultipleChoices(list):
 class QuibbleCmd(object):
 
     log = logging.getLogger('quibble.cmd')
-    stages = ['phpunit', 'npm-test', 'composer-test', 'qunit', 'selenium']
+    stages = ['phpunit-unit', 'phpunit', 'npm-test', 'composer-test', 'qunit',
+              'selenium']
     dump_dir = None
     db_dir = None
 
@@ -55,6 +57,7 @@ class QuibbleCmd(object):
                                   else 'ref')
         self.default_workspace = ('/workspace' if quibble.is_in_docker()
                                   else os.getcwd())
+        self.default_logdir = 'log'
 
     def parse_arguments(self, args=sys.argv[1:]):
         return self.get_arg_parser().parse_args(args)
@@ -77,6 +80,19 @@ class QuibbleCmd(object):
             action='store_true',
             help='Do not clone/checkout in workspace')
         parser.add_argument(
+            '--resolve-requires',
+            action='store_true',
+            help='Whether to process extension.json/skin.json and clone extra '
+                 'extensions/skins mentioned in the "requires" statement. '
+                 'This is done recursively.')
+        parser.add_argument(
+            '--fail-on-extra-requires',
+            action='store_true',
+            help='When --resolve-requires caused Quibble to clone extra '
+                 'requirements not in the list of projects: fail.'
+                 'Can be used to enforce extensions and skins to declare '
+                 'their requirements via the extension registry.')
+        parser.add_argument(
             '--skip-deps',
             action='store_true',
             help='Do not run composer/npm')
@@ -84,6 +100,14 @@ class QuibbleCmd(object):
             '--skip-install',
             action='store_true',
             help='Do not install MediaWiki')
+        parser.add_argument(
+            '--webserver',
+            choices=['apache2', 'php', 'none'],
+            default='php',
+            help='Web server to use. Default to PHP built-in. '
+                 'Apache2 will spawn an httpd process while none assumes that '
+                 'the local MediaWiki site can be accessed at 127.0.0.1 via an '
+                 'already running web server.')
         parser.add_argument(
             '--db',
             choices=['sqlite', 'mysql', 'postgres'],
@@ -138,7 +162,7 @@ class QuibbleCmd(object):
             )
         parser.add_argument(
             '--log-dir',
-            default=os.path.join(self.default_workspace, 'log'),
+            default=self.default_logdir,
             help='Where logs and artifacts will be written to. '
             'Default: "log" relatively to workspace'
             )
@@ -222,49 +246,45 @@ class QuibbleCmd(object):
     def _warn_obsolete_env_deps(self, var):
         self.log.warning(
             '%s env variable is deprecated. '
-            'Instead pass projects as arguments.' % var)
+            'Instead pass projects as arguments.', var)
 
-    def set_repos_to_clone(self, projects=[], clone_vendor=False):
+    def repos_to_clone(self, projects=[], zuul_project=None,
+                       clone_vendor=False):
         """
         Find repos to clone basedon passed arguments and environment
         """
-        # mediawiki/core should be first else git clone will fail because the
-        # destination directory already exists.
-        self.dependencies.insert(0, 'mediawiki/core')
-        self.dependencies.append('mediawiki/skins/Vector')
+        dependencies = set()
+        dependencies.add('mediawiki/skins/Vector')
         if clone_vendor:
             self.log.info('Adding mediawiki/vendor')
-            self.dependencies.append('mediawiki/vendor')
+            dependencies.add('mediawiki/vendor')
 
-        if 'ZUUL_PROJECT' in os.environ:
-            zuul_project = os.environ.get('ZUUL_PROJECT')
-            if zuul_project not in self.dependencies:
-                self.dependencies.append(zuul_project)
+        if zuul_project is not None:
+            dependencies.add(zuul_project)
 
         if 'SKIN_DEPENDENCIES' in os.environ:
             self._warn_obsolete_env_deps('SKIN_DEPENDENCIES')
-            self.dependencies.extend(
+            dependencies.update(
                 os.environ.get('SKIN_DEPENDENCIES').split('\\n'))
 
         if 'EXT_DEPENDENCIES' in os.environ:
             self._warn_obsolete_env_deps('EXT_DEPENDENCIES')
-            self.dependencies.extend(
+            dependencies.update(
                 os.environ.get('EXT_DEPENDENCIES').split('\\n'))
 
-        self.dependencies.extend(projects)
+        dependencies.update(projects)
 
-        self.log.info('Projects: %s'
-                      % ', '.join(self.dependencies))
+        # mediawiki/core should be first else git clone will fail because the
+        # destination directory already exists.
+        if 'mediawiki/core' in dependencies:
+            dependencies.remove('mediawiki/core')
+        dependencies = sorted(dependencies)
+        dependencies.insert(0, 'mediawiki/core')
 
-        return self.dependencies
+        self.log.info('Projects: %s',
+                      ', '.join(dependencies))
 
-    def isCoreOrVendor(self, project):
-        return project == 'mediawiki/core' or project == 'mediawiki/vendor'
-
-    def isExtOrSkin(self, project):
-        return project.startswith(
-            ('mediawiki/extensions/', 'mediawiki/skins/')
-        )
+        return dependencies
 
     def should_run(self, stage):
         if self.args.commands:
@@ -292,47 +312,64 @@ class QuibbleCmd(object):
         if self.args.dump_db_postrun:
             self.dump_dir = self.log_dir
 
-        self.log.debug('Running stages: '
-                       + ', '.join(stage for stage in self.stages
-                                   if self.should_run(stage)))
+        self.log.debug('Running stages: %s',
+                       ', '.join(stage for stage in self.stages
+                                 if self.should_run(stage)))
 
         self.setup_environment()
 
         zuul_project = os.environ.get('ZUUL_PROJECT', None)
         if zuul_project is None:
+            # TODO: Isn't this default already covered by quibble.zuul, and we
+            # can remove this code?
             self.log.warning('ZUUL_PROJECT not set. Assuming mediawiki/core')
             zuul_project = 'mediawiki/core'
         else:
-            self.log.debug("ZUUL_PROJECT=%s" % zuul_project)
+            self.log.debug("ZUUL_PROJECT=%s", zuul_project)
 
-        projects_to_clone = self.set_repos_to_clone(
+        self.dependencies = self.repos_to_clone(
             projects=self.args.projects,
+            zuul_project=zuul_project,
             clone_vendor=(self.args.packages_source == 'vendor'))
 
+        plan.append(quibble.commands.ReportVersions())
+
         if not self.args.skip_zuul:
+            zuul_params = {
+                'branch': self.args.branch,
+                'cache_dir': self.args.git_cache,
+                'project_branch': self.args.project_branch,
+                'workers': self.args.git_parallel,
+                'workspace': os.path.join(self.workspace, 'src'),
+                'zuul_branch': os.getenv('ZUUL_BRANCH'),
+                'zuul_newrev': os.getenv('ZUUL_NEWREV'),
+                'zuul_project': os.getenv('ZUUL_PROJECT'),
+                'zuul_ref': os.getenv('ZUUL_REF'),
+                'zuul_url': os.getenv('ZUUL_URL'),
+            }
             plan.append(quibble.commands.ZuulCloneCommand(
-                branch=self.args.branch,
-                cache_dir=self.args.git_cache,
-                project_branch=self.args.project_branch,
-                projects=projects_to_clone,
-                workers=self.args.git_parallel,
-                workspace=os.path.join(self.workspace, 'src'),
-                zuul_branch=os.getenv('ZUUL_BRANCH'),
-                zuul_newrev=os.getenv('ZUUL_NEWREV'),
-                zuul_project=os.getenv('ZUUL_PROJECT'),
-                zuul_ref=os.getenv('ZUUL_REF'),
-                zuul_url=os.getenv('ZUUL_URL')
+                projects=self.dependencies,
+                **zuul_params
             ))
+
+            if self.args.resolve_requires:
+                plan.append(quibble.commands.ResolveRequiresCommand(
+                    mw_install_path=self.mw_install_path,
+                    projects=self.dependencies,
+                    zuul_params=zuul_params,
+                    fail_on_extra_requires=self.args.fail_on_extra_requires,
+                ))
+
             plan.append(quibble.commands.ExtSkinSubmoduleUpdateCommand(
                 self.mw_install_path))
 
-        if self.isExtOrSkin(zuul_project):
+        if quibble.util.isExtOrSkin(zuul_project):
             run_composer = self.should_run('composer-test')
             run_npm = self.should_run('npm-test')
             if run_composer or run_npm:
                 project_dir = os.path.join(
                     self.mw_install_path,
-                    quibble.zuul.repo_dir(os.environ['ZUUL_PROJECT']))
+                    quibble.zuul.repo_dir(zuul_project))
 
                 plan.append(quibble.commands.ExtSkinComposerNpmTest(
                     project_dir, run_composer, run_npm))
@@ -368,6 +405,11 @@ class QuibbleCmd(object):
         elif zuul_project.startswith('mediawiki/skins/'):
             phpunit_testsuite = 'skins'
 
+        if self.should_run('phpunit-unit'):
+            plan.append(quibble.commands.PhpUnitUnit(
+                self.mw_install_path,
+                self.log_dir))
+
         if self.should_run('phpunit'):
             plan.append(quibble.commands.PhpUnitDatabaseless(
                 self.mw_install_path,
@@ -380,12 +422,17 @@ class QuibbleCmd(object):
                 composer=self.should_run('composer-test'),
                 npm=self.should_run('npm-test')))
 
-        if self.should_run('qunit') or self.should_run('selenium'):
-            display = os.environ.get('DISPLAY', None)
+        display = os.environ.get('DISPLAY', None)
+
+        if self.should_run('qunit'):
+            plan.append(quibble.commands.QunitTests(
+                self.mw_install_path))
+
+        if self.should_run('selenium'):
             plan.append(quibble.commands.BrowserTests(
                 self.mw_install_path,
-                self.should_run('qunit'),
-                self.should_run('selenium'),
+                quibble.util.move_item_to_head(
+                    self.dependencies, zuul_project),
                 display))
 
         if self.should_run('phpunit'):
@@ -405,11 +452,14 @@ class QuibbleCmd(object):
         for cmd in plan:
             self.log.debug(cmd)
         if self.args.dry_run:
+            self.log.warning("Exiting without execution: --dry-run")
             return
         for command in plan:
-            command.execute()
+            with quibble.Chronometer(str(command), self.log.info):
+                command.execute()
 
 
+# FIXME: Don't shadow QuibbleCmd.get_arg_parser
 def get_arg_parser():
     """
     Build an argparser with sane default values.
@@ -417,9 +467,10 @@ def get_arg_parser():
     Intended for documentation generation with sphinx-argparse.
     """
     cmd = QuibbleCmd()
+    # FIXME: These both might be redundant.  And why does sphinx need a custom
+    # endpoint?
     cmd.default_git_cache = 'ref'
     cmd.default_workspace = '.'
-    cmd.default_logdir = './log'
 
     return cmd.get_arg_parser()
 

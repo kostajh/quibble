@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 
 def copylog(src, dest):
-    log.info('Copying %s to %s' % (src, dest))
+    log.info('Copying %s to %s', src, dest)
     copyfile(src, dest)
 
 
@@ -55,3 +55,30 @@ def parallel_run(tasks):
         # As soon as any one task fails, the `all()` drops us out of the Pool's
         # context manager, and any remaining threads are terminated.
         return all(pool.imap_unordered(task_wrapper, tasks))
+
+
+def isCoreOrVendor(project):
+    """
+    project: a gerrit repository name
+
+    Returns boolean, whether the repository is mediawiki/core or
+    mediawiki/vendor.
+    """
+    return project == 'mediawiki/core' or project == 'mediawiki/vendor'
+
+
+def isExtOrSkin(project):
+    """
+    project: a gerrit repository name
+
+    Returns boolean, whether the repository is a MediaWiki extension or skin.
+    """
+    return project.startswith(
+        ('mediawiki/extensions/', 'mediawiki/skins/')
+    )
+
+
+def move_item_to_head(dependencies, project):
+    repos = list(dependencies)
+    repos.insert(0, repos.pop(repos.index(project)))
+    return repos

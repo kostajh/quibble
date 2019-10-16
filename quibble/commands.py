@@ -7,12 +7,49 @@ import os
 import os.path
 import pkg_resources
 from quibble.gitchangedinhead import GitChangedInHead
-from quibble.util import copylog, parallel_run
+from quibble.util import copylog, parallel_run, isExtOrSkin
+import quibble.mediawiki.registry
 import quibble.zuul
+import shutil
 import subprocess
 
 log = logging.getLogger(__name__)
+HTTP_HOST = '127.0.0.1'
 HTTP_PORT = 9412
+
+
+def server_url():
+    return 'http://%s:%s' % (HTTP_HOST, HTTP_PORT)
+
+
+class ReportVersions:
+    def execute(self):
+        commands = [
+            ['chromedriver', '--version'],
+            ['chromium', '--version'],
+            ['composer', '--version'],
+            ['node', '--version'],
+            ['npm', '--version'],
+            ['php', '--version'],
+        ]
+        for cmd in commands:
+            self.logged_call(cmd)
+
+    def logged_call(self, cmd):
+        try:
+            res = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+            message = '{}: {}'.format(
+                ' '.join(cmd),
+                res.strip().decode('utf-8'))
+            for line in message.split('\n'):
+                log.info(line)
+        except subprocess.CalledProcessError:
+            log.error('Failed to run command: %s', ' '.join(cmd))
+        except FileNotFoundError:
+            log.error('Command not found: %s', ' '.join(cmd))
+
+    def __str__(self):
+        return 'Report package versions'
 
 
 class ZuulCloneCommand:
@@ -44,6 +81,76 @@ class ZuulCloneCommand:
             json.dumps(pruned_params))
 
 
+class ResolveRequiresCommand:
+
+    def __init__(
+        self, mw_install_path, projects, zuul_params,
+        fail_on_extra_requires=False
+    ):
+        """
+        mw_install_path: root dir of MediaWiki
+        projects: list of Gerrit projects to initially clone
+        zuul_params: other parameters for ZuulCloneCommand
+        fail_on_extra_requires: if any repositories has been cloned and has
+        not been given in the initial list of projects, raise an exception.
+        """
+        self.mw_install_path = mw_install_path
+        self.projects = projects
+        self.zuul_params = zuul_params
+        if 'projects' in self.zuul_params:
+            del(self.zuul_params['projects'])
+        self.fail_on_extra_requires = fail_on_extra_requires
+
+    def execute(self):
+        log.info('Recursively processing registration dependencies')
+
+        ext_cloned = set(filter(isExtOrSkin, self.projects))
+        with quibble.logginglevel('zuul.CloneMapper', logging.WARNING):
+            required = self.clone_requires(ext_cloned, ext_cloned)
+        extras = set(required) - set(self.projects)
+
+        msg = 'Found extra requirements: %s' % ', '.join(extras)
+        if extras and self.fail_on_extra_requires:
+            raise Exception(msg)
+        else:
+            log.warning(msg)
+
+        log.info('Done preparing registration dependencies')
+
+    def clone_requires(self, new_projects, cloned):
+        to_be_cloned = new_projects - cloned
+        if to_be_cloned:
+            log.info('Cloning: %s', ', '.join(to_be_cloned))
+            ZuulCloneCommand(
+                projects=to_be_cloned,
+                **self.zuul_params
+            ).execute()
+
+        found = set()
+        for project in sorted(new_projects):
+            log.info('Looking for requirements of %s', project)
+
+            project_dir = os.path.join(
+                self.mw_install_path,
+                quibble.zuul.repo_dir(project))
+            deps = quibble.mediawiki.registry.from_path(project_dir)
+            found.update(deps.getRequiredRepos())
+
+        if not found:
+            log.debug('No additional requirements from %s',
+                      ', '.join(new_projects))
+            return set()
+
+        if found:
+            log.info('Found requirement(s): %s', ', '.join(found))
+            return found.union(self.clone_requires(found, cloned))
+
+    def __str__(self):
+        return (
+            'Recursively process registration dependencies. '
+            'Fails on extra requires: %s' % self.fail_on_extra_requires)
+
+
 class ExtSkinSubmoduleUpdateCommand:
     def __init__(self, mw_install_path):
         self.mw_install_path = mw_install_path
@@ -73,8 +180,8 @@ class ExtSkinSubmoduleUpdateCommand:
                         subprocess.check_call(cmd, cwd=dirpath)
                     except subprocess.CalledProcessError as e:
                         log.error(
-                            "Failed to process git submodules for {}".format(
-                                dirpath))
+                            "Failed to process git submodules for %s",
+                            dirpath)
                         raise e
 
     def __str__(self):
@@ -127,7 +234,7 @@ class ExtSkinComposerNpmTest:
         # TODO: Split these tasks and move parallelism into calling logic.
         parallel_run(tasks)
 
-        log.info('%s: git clean -xqdf' % self.directory)
+        log.info('%s: git clean -xqdf', self.directory)
         subprocess.check_call(['git', 'clean', '-xqdf'],
                               cwd=self.directory)
 
@@ -135,10 +242,10 @@ class ExtSkinComposerNpmTest:
         project_name = os.path.basename(self.directory)
 
         if not os.path.exists(os.path.join(self.directory, 'composer.json')):
-            log.warning("%s lacks a composer.json" % project_name)
+            log.warning("%s lacks a composer.json", project_name)
             return
 
-        log.info('Running "composer test" for %s' % project_name)
+        log.info('Running "composer test" for %s', project_name)
         cmds = [
             ['composer', '--ansi', 'validate', '--no-check-publish'],
             ['composer', '--ansi', 'install', '--no-progress',
@@ -154,13 +261,13 @@ class ExtSkinComposerNpmTest:
         # FIXME: copy paste is terrible
         # TODO: Detect test existence in an earlier phase.
         if not os.path.exists(os.path.join(self.directory, 'package.json')):
-            log.warning("%s lacks a package.json" % project_name)
+            log.warning("%s lacks a package.json", project_name)
             return
 
-        log.info('Running "npm test" for %s' % project_name)
+        log.info('Running "npm test" for %s', project_name)
         cmds = [
             ['npm', 'prune'],
-            ['npm', 'install', '--no-progress'],
+            ['npm', 'install', '--no-progress', '--prefer-offline'],
             ['npm', 'test'],
         ]
         for cmd in cmds:
@@ -264,7 +371,7 @@ class VendorComposerDependencies:
         reqs = ['='.join([dependency, version])
                 for dependency, version in composer['require-dev'].items()]
 
-        log.debug('composer require %s' % ' '.join(reqs))
+        log.debug('composer require %s', ' '.join(reqs))
         composer_require = ['composer', 'require', '--dev', '--ansi',
                             '--no-progress', '--prefer-dist', '-v']
         composer_require.extend(reqs)
@@ -304,7 +411,9 @@ class NpmInstall:
 
     def execute(self):
         subprocess.check_call(['npm', 'prune'], cwd=self.directory)
-        subprocess.check_call(['npm', 'install'], cwd=self.directory)
+        subprocess.check_call(
+            ['npm', 'install', '--no-progress', '--prefer-offline'],
+            cwd=self.directory)
 
     def __str__(self):
         return "npm install in {}".format(self.directory)
@@ -334,6 +443,7 @@ class InstallMediaWiki:
         # instantiating the database.
         install_args = [
             '--scriptpath=',
+            '--server=%s' % server_url(),
             '--dbtype=%s' % self.db_engine,
             '--dbname=%s' % db.dbname,
         ]
@@ -356,19 +466,20 @@ class InstallMediaWiki:
         )
 
         localsettings = os.path.join(self.mw_install_path, 'LocalSettings.php')
-        # Prepend our custom configuration snippets
-        with open(localsettings, 'r+') as lf:
-            quibblesettings = pkg_resources.resource_filename(
-                __name__, 'mediawiki/local_settings.php')
-            with open(quibblesettings) as qf:
-                quibble_conf = qf.read()
+        localsettings_installer = \
+            os.path.join(self.mw_install_path, 'LocalSettings-installer.php')
+        quibblesettings = pkg_resources.resource_filename(
+            __name__, 'mediawiki/local_settings.php')
 
-            installed_conf = lf.read()
-            lf.seek(0, 0)
-            lf.write(quibble_conf + '\n?>' + installed_conf)
+        os.rename(localsettings, localsettings_installer)
+        shutil.copyfile(quibblesettings, localsettings)
+
         copylog(localsettings,
                 os.path.join(self.log_dir, 'LocalSettings.php'))
-        subprocess.check_call(['php', '-l', localsettings])
+        copylog(localsettings_installer,
+                os.path.join(self.log_dir, 'LocalSettings-installer.php'))
+        subprocess.check_call(
+            ['php', '-l', localsettings, localsettings_installer])
 
         update_args = []
         if self.use_vendor:
@@ -399,12 +510,12 @@ class InstallMediaWiki:
 
 
 class AbstractPhpUnit:
-    def run_phpunit(self, group=[], exclude_group=[]):
+    def run_phpunit(self, group=[], exclude_group=[], cmd=None):
         log.info(self)
 
         always_excluded = ['Broken', 'ParserFuzz', 'Stub']
-
-        cmd = ['php', 'tests/phpunit/phpunit.php', '--debug-tests']
+        if not cmd:
+            cmd = ['php', 'tests/phpunit/phpunit.php', '--debug-tests']
         if self.testsuite:
             cmd.extend(['--testsuite', self.testsuite])
 
@@ -444,6 +555,24 @@ class PhpUnitDatabaseless(AbstractPhpUnit):
             self.testsuite or 'default')
 
 
+class PhpUnitUnit(AbstractPhpUnit):
+    def __init__(self, mw_install_path, log_dir):
+        self.mw_install_path = mw_install_path
+        self.log_dir = log_dir
+        self.testsuite = None
+        self.junit_file = os.path.join(self.log_dir, 'junit-unit.xml')
+
+    def execute(self):
+        if repo_has_composer_script(self.mw_install_path, 'phpunit:unit'):
+            self.run_phpunit(cmd=['composer', 'phpunit:unit', '--'])
+        else:
+            log.debug('skipping phpunit:unit stage, script is not present')
+            return
+
+    def __str__(self):
+        return "PHPUnit unit tests"
+
+
 class PhpUnitDatabase(AbstractPhpUnit):
     def __init__(self, mw_install_path, testsuite, log_dir):
         self.mw_install_path = mw_install_path
@@ -459,40 +588,21 @@ class PhpUnitDatabase(AbstractPhpUnit):
             self.testsuite or 'default')
 
 
-class BrowserTests:
-    def __init__(self, mw_install_path, qunit, selenium, display):
+class QunitTests:
+    def __init__(self, mw_install_path):
         self.mw_install_path = mw_install_path
-        self.qunit = qunit
-        # FIXME: find a nice way to analyze whether we're actually running
-        # qunit or selenium before creating the command.
-        self.selenium = selenium
-        self.display = display
 
     def execute(self):
         with quibble.backend.DevWebServer(
                 mwdir=self.mw_install_path,
+                host=HTTP_HOST,
                 port=HTTP_PORT):
-            if self.qunit:
-                self.run_qunit()
-
-            # Webdriver.io Selenium tests available since 1.29
-            if self.selenium and \
-                    os.path.exists(os.path.join(
-                        self.mw_install_path, 'tests/selenium')):
-                with ExitStack() as stack:
-                    if not self.display:
-                        self.display = ':94'  # XXX racy when run concurrently!
-                        log.info("No DISPLAY, using Xvfb.")
-                        stack.enter_context(
-                            quibble.backend.Xvfb(display=self.display))
-
-                    with quibble.backend.ChromeWebDriver(display=self.display):
-                        self.run_webdriver()
+            self.run_qunit()
 
     def run_qunit(self):
         karma_env = {
              'CHROME_BIN': '/usr/bin/chromium',
-             'MW_SERVER': 'http://127.0.0.1:%s' % HTTP_PORT,
+             'MW_SERVER': server_url(),
              'MW_SCRIPT_PATH': '/',
              'FORCE_COLOR': '1',  # for 'supports-color'
              }
@@ -505,11 +615,45 @@ class BrowserTests:
             env=karma_env,
         )
 
-    def run_webdriver(self):
+    def __str__(self):
+        return "Run Qunit tests"
+
+
+class BrowserTests:
+    def __init__(self, mw_install_path, projects, display):
+        self.mw_install_path = mw_install_path
+        self.projects = projects
+        self.display = display
+
+    def execute(self):
+        with quibble.backend.DevWebServer(
+                mwdir=self.mw_install_path,
+                host=HTTP_HOST,
+                port=HTTP_PORT):
+            self.run_selenium()
+
+    def run_selenium(self):
+        with ExitStack() as stack:
+            if not self.display:
+                self.display = ':94'  # XXX racy when run concurrently!
+                log.info("No DISPLAY, using Xvfb.")
+                stack.enter_context(
+                    quibble.backend.Xvfb(display=self.display))
+
+            with quibble.backend.ChromeWebDriver(display=self.display):
+                for project in self.projects:
+                    project_dir = os.path.normpath(os.path.join(
+                        self.mw_install_path,
+                        quibble.zuul.repo_dir(project)))
+                    if repo_has_npm_script(project_dir, 'selenium-test'):
+                        self.run_webdriver(project_dir)
+
+    def run_webdriver(self, project_dir):
+        log.info('Running webdriver test in %s', project_dir)
         webdriver_env = {}
         webdriver_env.update(os.environ)
         webdriver_env.update({
-            'MW_SERVER': 'http://127.0.0.1:%s' % HTTP_PORT,
+            'MW_SERVER': server_url(),
             'MW_SCRIPT_PATH': '/',
             'FORCE_COLOR': '1',  # for 'supports-color'
             'MEDIAWIKI_USER': 'WikiAdmin',
@@ -518,19 +662,17 @@ class BrowserTests:
         })
 
         subprocess.check_call(
+            ['npm', 'install', '--prefer-offline'],
+            cwd=project_dir)
+        subprocess.check_call(
             ['npm', 'run', 'selenium-test'],
-            cwd=self.mw_install_path,
+            cwd=project_dir,
             env=webdriver_env)
 
     def __str__(self):
-        tests = []
-        if self.qunit:
-            tests.append("qunit")
-        if self.selenium:
-            tests.append("selenium (maybe)")
-
-        return "Browser tests in {}: {} using DISPLAY={}".format(
-            self.mw_install_path, ", ".join(tests), self.display or "Xvfb")
+        return "Browser tests using DISPLAY={}, for projects {}".format(
+            self.display or "Xvfb",
+            ", ".join(self.projects))
 
 
 class UserCommands:
@@ -542,8 +684,9 @@ class UserCommands:
         log.info('User commands')
         with quibble.backend.DevWebServer(
                 mwdir=self.mw_install_path,
+                host=HTTP_HOST,
                 port=HTTP_PORT):
-            log.info('working directory: %s' % self.mw_install_path)
+            log.info('working directory: %s', self.mw_install_path)
 
             for cmd in self.commands:
                 log.info(cmd)
@@ -552,3 +695,22 @@ class UserCommands:
 
     def __str__(self):
         return "User commands: {}".format(", ".join(self.commands))
+
+
+def repo_has_composer_script(project_dir, script_name):
+    composer_path = os.path.join(project_dir, 'composer.json')
+    return json_has_script(composer_path, script_name)
+
+
+def repo_has_npm_script(project_dir, script_name):
+    package_path = os.path.join(project_dir, 'package.json')
+    return json_has_script(package_path, script_name)
+
+
+def json_has_script(json_file, script_name):
+    if not os.path.exists(json_file):
+        return False
+    with open(json_file) as f:
+        spec = json.load(f)
+    return ('scripts' in spec
+            and script_name in spec['scripts'])

@@ -1,3 +1,4 @@
+import logging
 import os
 import quibble
 import unittest
@@ -5,6 +6,24 @@ from unittest import mock
 
 
 class QuibbleTest(unittest.TestCase):
+
+    def test_logginglevel(self):
+        logger_name = 'SomeTestingLogger'
+        initial_level = logging.DEBUG
+        transient_level = logging.ERROR
+
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(initial_level)
+
+        with quibble.logginglevel(logger_name, transient_level):
+            self.assertEquals(
+                transient_level,
+                logger.getEffectiveLevel(),
+                'logginglevel must set a transient logging level')
+        self.assertEquals(
+            initial_level,
+            logger.getEffectiveLevel(),
+            'logginglevel must restore the initial logging level')
 
     @mock.patch.dict(os.environ, {'DISPLAY': ':0'})
     def test_use_headless__display_set(self):
@@ -52,3 +71,11 @@ class QuibbleTest(unittest.TestCase):
     def test_chrome_does_not_throttle_history_state_changes(self):
         self.assertIn('--disable-pushstate-throttle',
                       quibble.chromium_flags())
+
+    @mock.patch('time.time')
+    def test_chronometer(self, mock_time):
+        mock_time.side_effect = [1.5, 2.5]
+        mock_log = mock.MagicMock()
+        with quibble.Chronometer('method', mock_log):
+            pass
+        mock_log.assert_called_with('method finished in 1.000 s')
